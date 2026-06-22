@@ -1,10 +1,10 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { MessageSquarePlus, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { relativeTime } from "../lib/utils";
 import type { Conversation } from "../types";
+import { RelativeTime } from "./RelativeTime";
 import { Button } from "./ui/button";
-import { ScrollArea } from "./ui/scroll-area";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 interface ChatSidebarProps {
 	conversations: Conversation[];
@@ -26,7 +26,7 @@ export function ChatSidebar({
 	const [hoveredId, setHoveredId] = useState<string | null>(null);
 
 	return (
-		<div className="flex h-full w-[250px] flex-shrink-0 flex-col border-r border-neutral-200 bg-white">
+		<div className="flex h-full w-[250px] flex-shrink-0 flex-col overflow-hidden border-r border-neutral-200 bg-white">
 			<div className="flex items-center justify-between border-b border-neutral-100 p-3">
 				<span className="text-sm font-semibold text-neutral-700">Chats</span>
 				<Button variant="ghost" size="icon" onClick={onCreate} title="New chat">
@@ -34,7 +34,7 @@ export function ChatSidebar({
 				</Button>
 			</div>
 
-			<ScrollArea className="flex-1">
+			<div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain">
 				<div className="p-2">
 					{loading && conversations.length === 0 && (
 						<div className="space-y-2 p-2">
@@ -57,52 +57,60 @@ export function ChatSidebar({
 						{conversations.map((conversation) => (
 							<motion.div
 								key={conversation.id}
+								className="min-w-0"
 								initial={{ opacity: 0, height: 0 }}
 								animate={{ opacity: 1, height: "auto" }}
 								exit={{ opacity: 0, height: 0 }}
 								transition={{ duration: 0.15 }}
 							>
-								<button
-									type="button"
-									className={`group flex w-full items-center rounded-lg px-3 py-2.5 text-left transition-colors ${
+								<div
+									className={`grid grid-cols-[minmax(0,1fr)_1.75rem] items-center rounded-lg transition-colors ${
 										selectedId === conversation.id
 											? "bg-neutral-100"
 											: "hover:bg-neutral-50"
 									}`}
-									onClick={() => onSelect(conversation.id)}
 									onMouseEnter={() => setHoveredId(conversation.id)}
 									onMouseLeave={() => setHoveredId(null)}
 								>
-									<div className="min-w-0 flex-1 overflow-hidden">
-										<p className="truncate text-sm font-medium text-neutral-800">
-											{conversation.title}
-										</p>
-										<p className="mt-0.5 text-xs text-neutral-400">
-											{relativeTime(conversation.updated_at)}
-										</p>
-									</div>
+									<button
+										type="button"
+										className="min-w-0 overflow-hidden py-2.5 pl-3 pr-1 text-left"
+										onClick={() => onSelect(conversation.id)}
+									>
+										<Tooltip>
+											<TooltipTrigger asChild>
+												<p className="truncate text-sm font-medium text-neutral-800">
+													{conversation.title}
+												</p>
+											</TooltipTrigger>
+											<TooltipContent side="right" className="max-w-xs">
+												{conversation.title}
+											</TooltipContent>
+										</Tooltip>
+										<RelativeTime
+											date={conversation.updated_at}
+											className="mt-0.5 block text-xs text-neutral-400"
+										/>
+									</button>
 
-									<div className="ml-2 w-6 flex-shrink-0">
+									<div className="flex items-center justify-center">
 										{hoveredId === conversation.id && (
 											<button
 												type="button"
-												className="rounded p-1 text-neutral-400 hover:bg-neutral-200 hover:text-red-500"
-												onClick={(e) => {
-													e.stopPropagation();
-													onDelete(conversation.id);
-												}}
-												title="Delete conversation"
+												className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-red-600 hover:bg-neutral-200"
+												aria-label={`Delete ${conversation.title}`}
+												onClick={() => onDelete(conversation.id)}
 											>
 												<Trash2 className="h-3.5 w-3.5" />
 											</button>
 										)}
 									</div>
-								</button>
+								</div>
 							</motion.div>
 						))}
 					</AnimatePresence>
 				</div>
-			</ScrollArea>
+			</div>
 		</div>
 	);
 }

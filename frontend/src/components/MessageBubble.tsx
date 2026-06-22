@@ -2,6 +2,7 @@ import { motion } from "framer-motion";
 import { Bot } from "lucide-react";
 import { Streamdown } from "streamdown";
 import "streamdown/styles.css";
+import { formatCitationSummary } from "../lib/citations";
 import type { Message } from "../types";
 
 interface MessageBubbleProps {
@@ -40,6 +41,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 	}
 
 	// Assistant message
+	const citationSummary = formatCitationSummary(message);
+
 	return (
 		<motion.div
 			initial={{ opacity: 0, y: 8 }}
@@ -54,11 +57,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 				<div className="prose">
 					<Streamdown>{message.content}</Streamdown>
 				</div>
-				{message.sources_cited > 0 && (
-					<p className="mt-1.5 text-xs text-neutral-400">
-						{message.sources_cited} source
-						{message.sources_cited !== 1 ? "s" : ""} cited
-					</p>
+				{citationSummary && (
+					<p className="mt-1.5 text-xs text-neutral-400">{citationSummary}</p>
 				)}
 			</div>
 		</motion.div>

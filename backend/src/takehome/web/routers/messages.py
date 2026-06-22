@@ -9,13 +9,21 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from starlette.responses import StreamingResponse
 
-from takehome.db.models import Message
+from takehome.db.models import Message, MessageCitedDocument
 from takehome.db.session import get_session
 from takehome.services.conversation import get_conversation, update_conversation
-from takehome.services.document import get_document_for_conversation
-from takehome.services.llm import chat_with_document, count_sources_cited, generate_title
+from takehome.services.document import list_document_events
+from takehome.services.llm import (
+    DocumentContext,
+    HistoryMessage,
+    analyze_document_citations,
+    chat_with_documents,
+    generate_title,
+    is_over_budget_async,
+)
 
 logger = structlog.get_logger()
 
@@ -27,12 +35,18 @@ router = APIRouter(tags=["messages"])
 # --------------------------------------------------------------------------- #
 
 
+class CitedDocumentOut(BaseModel):
+    document_id: str
+    citation_count: int
+
+
 class MessageOut(BaseModel):
     id: str
     conversation_id: str
     role: str
     content: str
     sources_cited: int
+    cited_documents: list[CitedDocumentOut] = []
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -40,6 +54,25 @@ class MessageOut(BaseModel):
 
 class MessageCreate(BaseModel):
     content: str
+
+
+def _message_to_out(message: Message) -> MessageOut:
+    cited = [
+        CitedDocumentOut(
+            document_id=row.document_id,
+            citation_count=row.citation_count,
+        )
+        for row in sorted(message.cited_documents, key=lambda r: r.document_id)
+    ]
+    return MessageOut(
+        id=message.id,
+        conversation_id=message.conversation_id,
+        role=message.role,
+        content=message.content,
+        sources_cited=message.sources_cited,
+        cited_documents=cited,
+        created_at=message.created_at,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -64,22 +97,13 @@ async def list_messages(
     stmt = (
         select(Message)
         .where(Message.conversation_id == conversation_id)
+        .options(selectinload(Message.cited_documents))
         .order_by(Message.created_at.asc())
     )
     result = await session.execute(stmt)
     messages = list(result.scalars().all())
 
-    return [
-        MessageOut(
-            id=m.id,
-            conversation_id=m.conversation_id,
-            role=m.role,
-            content=m.content,
-            sources_cited=m.sources_cited,
-            created_at=m.created_at,
-        )
-        for m in messages
-    ]
+    return [_message_to_out(m) for m in messages]
 
 
 @router.post("/api/conversations/{conversation_id}/messages")
@@ -94,6 +118,53 @@ async def send_message(
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    # Load all documents (incl. soft-deleted) and assign each its stable ordinal
+    # (rank by uploaded_at over all docs, tie-broken by id — already the event
+    # order). Active docs contribute text; removed ones feed the timeline only.
+    events = await list_document_events(session, conversation_id)
+    documents = [
+        DocumentContext(
+            ordinal=index + 1,
+            id=doc.id,
+            filename=doc.filename,
+            uploaded_at=doc.uploaded_at,
+            extracted_text=doc.extracted_text,
+            deleted_at=doc.deleted_at,
+            token_count=doc.token_count,
+        )
+        for index, doc in enumerate(events)
+    ]
+
+    # Load existing conversation history (before persisting the new user turn).
+    stmt = (
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.asc())
+    )
+    result = await session.execute(stmt)
+    history_messages = list(result.scalars().all())
+
+    conversation_history: list[HistoryMessage] = [
+        {"role": m.role, "content": m.content, "timestamp": m.created_at}
+        for m in history_messages
+    ]
+
+    # Over-budget = block the send (§0.2). We never truncate a legal document; if
+    # the assembled prompt won't fit, reject before saving the message so the user
+    # can remove a document and retry.
+    if await is_over_budget_async(
+        documents=documents,
+        conversation_history=conversation_history,
+        user_message=body.content,
+    ):
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "The documents in this conversation exceed the model's context "
+                "window. Remove a document to continue."
+            ),
+        )
+
     # Save the user message
     user_message = Message(
         conversation_id=conversation_id,
@@ -106,24 +177,6 @@ async def send_message(
 
     logger.info("User message saved", conversation_id=conversation_id, message_id=user_message.id)
 
-    # Load document text for the conversation
-    document = await get_document_for_conversation(session, conversation_id)
-    document_text: str | None = document.extracted_text if document else None
-
-    # Load conversation history (exclude the message we just saved, it will be the user_message param)
-    stmt = (
-        select(Message)
-        .where(Message.conversation_id == conversation_id)
-        .where(Message.id != user_message.id)
-        .order_by(Message.created_at.asc())
-    )
-    result = await session.execute(stmt)
-    history_messages = list(result.scalars().all())
-
-    conversation_history: list[dict[str, str]] = [
-        {"role": m.role, "content": m.content} for m in history_messages
-    ]
-
     # Determine if this is the first user message (for title generation)
     user_msg_count = sum(1 for m in history_messages if m.role == "user")
     is_first_message = user_msg_count == 0
@@ -133,9 +186,9 @@ async def send_message(
         full_response = ""
 
         try:
-            async for chunk in chat_with_document(
+            async for chunk in chat_with_documents(
                 user_message=body.content,
-                document_text=document_text,
+                documents=documents,
                 conversation_history=conversation_history,
             ):
                 full_response += chunk
@@ -152,8 +205,9 @@ async def send_message(
             event_data = json.dumps({"type": "content", "content": error_msg})
             yield f"data: {event_data}\n\n"
 
-        # Count sources cited in the full response
-        sources = count_sources_cited(full_response)
+        # Attribute citations per document (ordinal → id) and persist them.
+        citation_analysis = analyze_document_citations(full_response, documents)
+        sources = citation_analysis.total
 
         # Save the assistant message to the database.
         # We need a fresh session since the outer one may have been closed.
@@ -167,6 +221,17 @@ async def send_message(
                 sources_cited=sources,
             )
             save_session.add(assistant_message)
+            await save_session.flush()
+
+            for citation in citation_analysis.citations:
+                save_session.add(
+                    MessageCitedDocument(
+                        message_id=assistant_message.id,
+                        document_id=citation.document_id,
+                        citation_count=citation.count,
+                    )
+                )
+
             await save_session.commit()
             await save_session.refresh(assistant_message)
 
@@ -196,6 +261,13 @@ async def send_message(
                         "role": assistant_message.role,
                         "content": assistant_message.content,
                         "sources_cited": assistant_message.sources_cited,
+                        "cited_documents": [
+                            {
+                                "document_id": c.document_id,
+                                "citation_count": c.count,
+                            }
+                            for c in citation_analysis.citations
+                        ],
                         "created_at": assistant_message.created_at.isoformat(),
                     },
                 }
@@ -207,6 +279,7 @@ async def send_message(
                 {
                     "type": "done",
                     "sources_cited": sources,
+                    "cited_document_ids": citation_analysis.cited_document_ids,
                     "message_id": assistant_message.id,
                 }
             )

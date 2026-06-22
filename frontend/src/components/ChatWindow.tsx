@@ -8,23 +8,29 @@ import { MessageBubble, StreamingBubble } from "./MessageBubble";
 interface ChatWindowProps {
 	messages: Message[];
 	loading: boolean;
+	refreshing?: boolean;
 	error: string | null;
 	streaming: boolean;
 	streamingContent: string;
 	hasDocument: boolean;
 	conversationId: string | null;
+	contextFull?: boolean;
+	uploading?: boolean;
 	onSend: (content: string) => void;
-	onUpload: (file: File) => void;
+	onUpload: (files: File[]) => void;
 }
 
 export function ChatWindow({
 	messages,
 	loading,
+	refreshing = false,
 	error,
 	streaming,
 	streamingContent,
 	hasDocument,
 	conversationId,
+	contextFull = false,
+	uploading = false,
 	onSend,
 	onUpload,
 }: ChatWindowProps) {
@@ -52,8 +58,8 @@ export function ChatWindow({
 		);
 	}
 
-	// Loading messages
-	if (loading) {
+	// First visit only — cached chats render immediately while revalidating.
+	if (loading && messages.length === 0) {
 		return (
 			<div className="flex flex-1 items-center justify-center bg-white">
 				<Loader2 className="h-6 w-6 animate-spin text-neutral-400" />
@@ -73,14 +79,15 @@ export function ChatWindow({
 							</p>
 						</div>
 					) : (
-						<EmptyState onUpload={onUpload} />
+						<EmptyState onUpload={onUpload} uploading={uploading} />
 					)}
 				</div>
 				<ChatInput
 					onSend={onSend}
 					onUpload={onUpload}
 					disabled={streaming}
-					hasDocument={hasDocument}
+					contextFull={contextFull}
+					uploading={uploading}
 				/>
 			</div>
 		);
@@ -88,6 +95,12 @@ export function ChatWindow({
 
 	return (
 		<div className="flex flex-1 flex-col bg-white">
+			{refreshing && (
+				<div className="flex items-center justify-center gap-2 border-b border-neutral-100 bg-neutral-50 px-4 py-1">
+					<Loader2 className="h-3 w-3 animate-spin text-neutral-400" />
+					<span className="text-xs text-neutral-400">Updating…</span>
+				</div>
+			)}
 			{error && (
 				<div className="mx-4 mt-2 rounded-lg bg-red-50 px-4 py-2 text-sm text-red-600">
 					{error}
@@ -107,7 +120,8 @@ export function ChatWindow({
 				onSend={onSend}
 				onUpload={onUpload}
 				disabled={streaming}
-				hasDocument={hasDocument}
+				contextFull={contextFull}
+				uploading={uploading}
 			/>
 		</div>
 	);

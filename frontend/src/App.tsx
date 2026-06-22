@@ -1,11 +1,14 @@
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { ChatSidebar } from "./components/ChatSidebar";
 import { ChatWindow } from "./components/ChatWindow";
-import { DocumentViewer } from "./components/DocumentViewer";
+import { DocumentDropZone } from "./components/DocumentDropZone";
+import { DocumentPanel } from "./components/DocumentPanel";
 import { TooltipProvider } from "./components/ui/tooltip";
+import { useContextUsage } from "./hooks/use-context-usage";
 import { useConversations } from "./hooks/use-conversations";
-import { useDocument } from "./hooks/use-document";
+import { useDocuments } from "./hooks/use-documents";
 import { useMessages } from "./hooks/use-messages";
+import { getCitedDocumentIds } from "./lib/citations";
 
 export default function App() {
 	const {
@@ -21,6 +24,7 @@ export default function App() {
 	const {
 		messages,
 		loading: messagesLoading,
+		refreshing: messagesRefreshing,
 		error: messagesError,
 		streaming,
 		streamingContent,
@@ -28,28 +32,60 @@ export default function App() {
 	} = useMessages(selectedId);
 
 	const {
-		document,
+		documents,
+		activeDocumentId,
+		activeDocument,
+		setActiveDocument,
 		upload,
-		refresh: refreshDocument,
-	} = useDocument(selectedId);
+		remove: removeDocument,
+		uploading,
+		uploadQueue,
+		refresh: refreshDocuments,
+		hasDocuments,
+	} = useDocuments(selectedId);
+
+	const {
+		refreshContextUsage,
+		contextUsage,
+		contextUsageLoading,
+		contextFull,
+	} = useContextUsage(selectedId, documents);
+
+	const citedDocumentIds = useMemo(
+		() => getCitedDocumentIds(messages),
+		[messages],
+	);
 
 	const handleSend = useCallback(
 		async (content: string) => {
 			await send(content);
 			refreshConversations();
+			void refreshContextUsage();
 		},
-		[send, refreshConversations],
+		[send, refreshConversations, refreshContextUsage],
 	);
 
 	const handleUpload = useCallback(
-		async (file: File) => {
-			const doc = await upload(file);
-			if (doc) {
-				refreshDocument();
+		async (files: File[]) => {
+			const { uploaded } = await upload(files);
+			if (uploaded.length > 0) {
+				refreshDocuments();
 				refreshConversations();
+				void refreshContextUsage();
 			}
 		},
-		[upload, refreshDocument, refreshConversations],
+		[upload, refreshDocuments, refreshConversations, refreshContextUsage],
+	);
+
+	const handleRemoveDocument = useCallback(
+		async (documentId: string) => {
+			const removed = await removeDocument(documentId);
+			if (removed) {
+				refreshConversations();
+				void refreshContextUsage();
+			}
+		},
+		[removeDocument, refreshConversations, refreshContextUsage],
 	);
 
 	const handleCreate = useCallback(async () => {
@@ -68,19 +104,39 @@ export default function App() {
 					onDelete={remove}
 				/>
 
-				<ChatWindow
-					messages={messages}
-					loading={messagesLoading}
-					error={messagesError}
-					streaming={streaming}
-					streamingContent={streamingContent}
-					hasDocument={!!document}
-					conversationId={selectedId}
-					onSend={handleSend}
-					onUpload={handleUpload}
-				/>
+				<DocumentDropZone enabled={Boolean(selectedId)} onUpload={handleUpload}>
+					<ChatWindow
+						messages={messages}
+						loading={messagesLoading}
+						refreshing={messagesRefreshing}
+						error={messagesError}
+						streaming={streaming}
+						streamingContent={streamingContent}
+						hasDocument={hasDocuments}
+						conversationId={selectedId}
+						contextFull={contextFull}
+						onSend={handleSend}
+						onUpload={handleUpload}
+						uploading={uploading}
+					/>
 
-				<DocumentViewer document={document} />
+					{selectedId && (
+						<DocumentPanel
+							documents={documents}
+							activeDocument={activeDocument}
+							activeDocumentId={activeDocumentId}
+							citedDocumentIds={citedDocumentIds}
+							uploading={uploading}
+							uploadQueue={uploadQueue}
+							conversationId={selectedId}
+							contextUsage={contextUsage}
+							contextUsageLoading={contextUsageLoading}
+							onSelect={setActiveDocument}
+							onUpload={handleUpload}
+							onRemove={handleRemoveDocument}
+						/>
+					)}
+				</DocumentDropZone>
 			</div>
 		</TooltipProvider>
 	);

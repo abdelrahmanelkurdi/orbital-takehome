@@ -2,8 +2,16 @@ import { Loader2, Upload } from "lucide-react";
 import { type DragEvent, useCallback, useRef, useState } from "react";
 
 interface DocumentUploadProps {
-	onUpload: (file: File) => void;
+	onUpload: (files: File[]) => void;
 	uploading?: boolean;
+}
+
+function collectPdfFiles(fileList: FileList | File[]): File[] {
+	return Array.from(fileList).filter(
+		(file) =>
+			file.type === "application/pdf" ||
+			file.name.toLowerCase().endsWith(".pdf"),
+	);
 }
 
 export function DocumentUpload({
@@ -12,6 +20,16 @@ export function DocumentUpload({
 }: DocumentUploadProps) {
 	const [dragOver, setDragOver] = useState(false);
 	const fileInputRef = useRef<HTMLInputElement>(null);
+
+	const handleFiles = useCallback(
+		(files: File[]) => {
+			const pdfs = collectPdfFiles(files);
+			if (pdfs.length > 0) {
+				onUpload(pdfs);
+			}
+		},
+		[onUpload],
+	);
 
 	const handleDragOver = useCallback((e: DragEvent) => {
 		e.preventDefault();
@@ -27,12 +45,9 @@ export function DocumentUpload({
 		(e: DragEvent) => {
 			e.preventDefault();
 			setDragOver(false);
-			const file = e.dataTransfer.files[0];
-			if (file && file.type === "application/pdf") {
-				onUpload(file);
-			}
+			handleFiles(Array.from(e.dataTransfer.files));
 		},
-		[onUpload],
+		[handleFiles],
 	);
 
 	const handleClick = useCallback(() => {
@@ -41,15 +56,12 @@ export function DocumentUpload({
 
 	const handleFileChange = useCallback(
 		(e: React.ChangeEvent<HTMLInputElement>) => {
-			const file = e.target.files?.[0];
-			if (file) {
-				onUpload(file);
-			}
+			handleFiles(Array.from(e.target.files ?? []));
 			if (fileInputRef.current) {
 				fileInputRef.current.value = "";
 			}
 		},
-		[onUpload],
+		[handleFiles],
 	);
 
 	return (
@@ -68,7 +80,8 @@ export function DocumentUpload({
 			<input
 				ref={fileInputRef}
 				type="file"
-				accept=".pdf"
+				accept=".pdf,application/pdf"
+				multiple
 				className="hidden"
 				onChange={handleFileChange}
 			/>
@@ -77,17 +90,17 @@ export function DocumentUpload({
 				<div className="flex flex-col items-center">
 					<Loader2 className="mb-3 h-10 w-10 animate-spin text-neutral-400" />
 					<p className="text-sm font-medium text-neutral-600">
-						Uploading document...
+						Uploading documents...
 					</p>
 				</div>
 			) : (
 				<div className="flex flex-col items-center">
 					<Upload className="mb-3 h-10 w-10 text-neutral-400" />
 					<p className="text-sm font-medium text-neutral-600">
-						Upload a PDF document
+						Upload PDF documents
 					</p>
 					<p className="mt-1 text-xs text-neutral-400">
-						Click or drag and drop
+						Click or drag and drop · multiple files supported
 					</p>
 				</div>
 			)}

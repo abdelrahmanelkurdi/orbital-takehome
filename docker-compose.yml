@@ -23,6 +23,7 @@ services:
       - "${API_PORT:-8000}:8000"
     volumes:
       - ./backend/src:/app/backend/src
+      - ./backend/tests:/app/backend/tests
       - ./alembic:/app/alembic
       - ./uploads:/app/uploads
       - ./pyproject.toml:/app/pyproject.toml
@@ -33,6 +34,18 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
     command: uv run uvicorn takehome.web.app:app --reload --host 0.0.0.0 --port 8000
 
   frontend:
@@ -49,7 +62,8 @@ services:
       - ./frontend/tsconfig.json:/app/tsconfig.json
       - ./frontend/biome.json:/app/biome.json
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   pgdata:

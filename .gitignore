@@ -17,7 +17,8 @@ uploads/*
 !uploads/.gitkeep
 
 # IDE
-.vscode/
+.vscode/*
+!.vscode/settings.json
 .idea/
 
 # OS

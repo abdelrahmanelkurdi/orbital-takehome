@@ -68,11 +68,28 @@ db-shell:
     docker compose exec db psql -U orbital orbital_takehome
 
 # =============================================================================
+# Testing
+# =============================================================================
+
+# Run all tests (backend + frontend)
+test: test-backend test-frontend
+
+# Backend tests (pytest)
+test-backend:
+    docker compose exec backend uv run pytest
+
+# Frontend tests (vitest)
+test-frontend:
+    docker compose exec frontend npm run test
+
+# =============================================================================
 # Code Quality
 # =============================================================================
 
-# Run all checks
-check: check-backend check-frontend
+# Run all checks (lint, type-check, tests).
+# Frontend tests run inside check-frontend (vitest is wired into `npm run check`);
+# test-backend adds the Python tests. So this runs everything exactly once.
+check: check-backend test-backend check-frontend
 
 # Format all code
 fmt: fmt-backend fmt-frontend

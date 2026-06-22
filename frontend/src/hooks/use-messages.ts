@@ -2,38 +2,69 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../lib/api";
 import type { Message } from "../types";
 
+/** Session cache — revisiting a chat shows messages immediately while revalidating. */
+const messageCache = new Map<string, Message[]>();
+
+function readCache(conversationId: string): Message[] | undefined {
+	return messageCache.get(conversationId);
+}
+
+function writeCache(conversationId: string, messages: Message[]) {
+	messageCache.set(conversationId, messages);
+}
+
 export function useMessages(conversationId: string | null) {
 	const [messages, setMessages] = useState<Message[]>([]);
 	const [loading, setLoading] = useState(false);
+	const [refreshing, setRefreshing] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [streaming, setStreaming] = useState(false);
 	const [streamingContent, setStreamingContent] = useState("");
-	const abortRef = useRef<AbortController | null>(null);
+	const fetchGenerationRef = useRef(0);
+
+	const applyMessages = useCallback((id: string, next: Message[]) => {
+		writeCache(id, next);
+		setMessages(next);
+	}, []);
 
 	const refresh = useCallback(async () => {
 		if (!conversationId) {
 			setMessages([]);
+			setLoading(false);
+			setRefreshing(false);
 			return;
 		}
-		try {
+
+		const cached = readCache(conversationId);
+		if (cached !== undefined) {
+			setMessages(cached);
+			setLoading(false);
+		} else {
 			setLoading(true);
-			setError(null);
+		}
+
+		setRefreshing(true);
+		setError(null);
+		const generation = ++fetchGenerationRef.current;
+
+		try {
 			const data = await api.fetchMessages(conversationId);
+			if (generation !== fetchGenerationRef.current) return;
+			writeCache(conversationId, data);
 			setMessages(data);
 		} catch (err) {
+			if (generation !== fetchGenerationRef.current) return;
 			setError(err instanceof Error ? err.message : "Failed to load messages");
 		} finally {
-			setLoading(false);
+			if (generation === fetchGenerationRef.current) {
+				setLoading(false);
+				setRefreshing(false);
+			}
 		}
 	}, [conversationId]);
 
 	useEffect(() => {
-		refresh();
-		return () => {
-			if (abortRef.current) {
-				abortRef.current.abort();
-			}
-		};
+		void refresh();
 	}, [refresh]);
 
 	const send = useCallback(
@@ -49,7 +80,11 @@ export function useMessages(conversationId: string | null) {
 				created_at: new Date().toISOString(),
 			};
 
-			setMessages((prev) => [...prev, userMessage]);
+			setMessages((prev) => {
+				const next = [...prev, userMessage];
+				writeCache(conversationId, next);
+				return next;
+			});
 			setStreaming(true);
 			setStreamingContent("");
 			setError(null);
@@ -72,7 +107,6 @@ export function useMessages(conversationId: string | null) {
 
 					buffer += decoder.decode(value, { stream: true });
 					const lines = buffer.split("\n");
-					// Keep the last potentially incomplete line in the buffer
 					buffer = lines.pop() ?? "";
 
 					for (const line of lines) {
@@ -97,11 +131,13 @@ export function useMessages(conversationId: string | null) {
 								accumulated += parsed.content;
 								setStreamingContent(accumulated);
 							} else if (parsed.type === "message" && parsed.message) {
-								// Final message from server
-								setMessages((prev) => [...prev, parsed.message as Message]);
+								setMessages((prev) => {
+									const next = [...prev, parsed.message as Message];
+									writeCache(conversationId, next);
+									return next;
+								});
 								accumulated = "";
 							} else if (parsed.content && !parsed.type) {
-								// Fallback: plain content field
 								accumulated += parsed.content;
 								setStreamingContent(accumulated);
 							}
@@ -111,8 +147,6 @@ export function useMessages(conversationId: string | null) {
 					}
 				}
 
-				// If we accumulated content but never got a final message,
-				// create a synthetic assistant message
 				if (accumulated) {
 					const assistantMessage: Message = {
 						id: `stream-${Date.now()}`,
@@ -122,12 +156,15 @@ export function useMessages(conversationId: string | null) {
 						sources_cited: 0,
 						created_at: new Date().toISOString(),
 					};
-					setMessages((prev) => [...prev, assistantMessage]);
+					setMessages((prev) => {
+						const next = [...prev, assistantMessage];
+						writeCache(conversationId, next);
+						return next;
+					});
 				}
 
-				// Refresh to get server-canonical messages
 				const freshMessages = await api.fetchMessages(conversationId);
-				setMessages(freshMessages);
+				applyMessages(conversationId, freshMessages);
 			} catch (err) {
 				if (err instanceof DOMException && err.name === "AbortError") return;
 				setError(err instanceof Error ? err.message : "Failed to send message");
@@ -136,16 +173,22 @@ export function useMessages(conversationId: string | null) {
 				setStreamingContent("");
 			}
 		},
-		[conversationId, streaming],
+		[conversationId, streaming, applyMessages],
 	);
 
 	return {
 		messages,
 		loading,
+		refreshing,
 		error,
 		streaming,
 		streamingContent,
 		send,
 		refresh,
 	};
+}
+
+/** Visible for tests only. */
+export function clearMessageCacheForTests() {
+	messageCache.clear();
 }
