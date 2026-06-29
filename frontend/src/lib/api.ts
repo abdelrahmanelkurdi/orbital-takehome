@@ -166,3 +166,29 @@ export async function fetchContextUsage(
 export function getDocumentUrl(documentId: string): string {
 	return `${BASE}/documents/${documentId}/content`;
 }
+
+export async function resolveCitationPage(
+	documentId: string,
+	params: {
+		page?: number | null;
+		label?: string;
+		quote?: string | null;
+	},
+): Promise<number | null> {
+	const search = new URLSearchParams();
+	if (params.page != null) {
+		search.set("page", String(params.page));
+	}
+	if (params.label) {
+		search.set("label", params.label);
+	}
+	if (params.quote) {
+		search.set("quote", params.quote);
+	}
+	const query = search.toString();
+	const res = await fetch(
+		`${BASE}/documents/${documentId}/citation-page${query ? `?${query}` : ""}`,
+	);
+	const body = await handleResponse<{ page: number | null }>(res);
+	return body.page;
+}

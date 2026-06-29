@@ -11,6 +11,7 @@ vi.mock("../lib/api", () => ({
 import * as api from "../lib/api";
 
 const fetchMessages = vi.mocked(api.fetchMessages);
+const sendMessage = vi.mocked(api.sendMessage);
 
 function makeMessage(id: string, conversationId: string): Message {
 	return {
@@ -21,6 +22,25 @@ function makeMessage(id: string, conversationId: string): Message {
 		sources_cited: 0,
 		created_at: "2026-01-01T00:00:00",
 	};
+}
+
+function sseStuckAfterContentDone(content = "Answer text"): Response {
+	const encoder = new TextEncoder();
+	const stream = new ReadableStream({
+		start(controller) {
+			controller.enqueue(
+				encoder.encode(
+					`data: ${JSON.stringify({ type: "content", content })}\n\n`,
+				),
+			);
+			controller.enqueue(
+				encoder.encode(
+					`data: ${JSON.stringify({ type: "content_done", grounding_pending: true })}\n\n`,
+				),
+			);
+		},
+	});
+	return new Response(stream);
 }
 
 describe("useMessages", () => {
@@ -96,5 +116,26 @@ describe("useMessages", () => {
 		});
 
 		expect(result.current.messages).toEqual(messagesB);
+	});
+
+	it("keeps verifying true after content_done until the message event", async () => {
+		const convId = "conv-stream";
+		fetchMessages.mockResolvedValue([]);
+
+		sendMessage.mockResolvedValue(sseStuckAfterContentDone());
+
+		const { result } = renderHook(() => useMessages(convId));
+
+		await waitFor(() => {
+			expect(result.current.loading).toBe(false);
+		});
+
+		void result.current.send("Question?");
+
+		await waitFor(() => {
+			expect(result.current.streaming).toBe(false);
+			expect(result.current.verifying).toBe(true);
+			expect(result.current.streamingContent).toBe("Answer text");
+		});
 	});
 });

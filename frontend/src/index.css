@@ -2,6 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+html,
+body {
+	height: 100%;
+	overflow: hidden;
+}
+
 body {
 	margin: 0;
 	padding: 0;
@@ -131,4 +137,12 @@ body {
 .prose th {
 	background-color: #f5f5f5;
 	font-weight: 600;
+}
+
+/* Citation quote highlight in PDF text layer */
+.react-pdf__Page__textContent mark.citation-highlight {
+	background-color: rgba(250, 204, 21, 0.55);
+	color: inherit;
+	border-radius: 2px;
+	padding: 0 1px;
 }

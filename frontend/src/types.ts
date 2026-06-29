@@ -11,6 +11,30 @@ export interface CitedDocument {
 	citation_count: number;
 }
 
+export type GroundingStatus = "grounded" | "partial" | "ungrounded";
+
+export type BlockBasis =
+	| "document"
+	| "general_knowledge"
+	| "mixed"
+	| "not_in_documents";
+
+export interface VerifiedCitation {
+	document_ordinal: number;
+	document_id: string;
+	label: string;
+	page?: number | null;
+	quote?: string | null;
+	verified: boolean;
+}
+
+export interface GroundingBlock {
+	block_index: number;
+	text: string;
+	basis: BlockBasis;
+	citations: VerifiedCitation[];
+}
+
 export interface Message {
 	id: string;
 	conversation_id: string;
@@ -18,6 +42,9 @@ export interface Message {
 	content: string;
 	sources_cited: number;
 	cited_documents?: CitedDocument[];
+	grounding_status?: GroundingStatus | null;
+	grounding_summary?: string | null;
+	blocks?: GroundingBlock[];
 	created_at: string;
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ChatSidebar } from "./components/ChatSidebar";
 import { ChatWindow } from "./components/ChatWindow";
 import { DocumentDropZone } from "./components/DocumentDropZone";
@@ -9,8 +9,16 @@ import { useConversations } from "./hooks/use-conversations";
 import { useDocuments } from "./hooks/use-documents";
 import { useMessages } from "./hooks/use-messages";
 import { getCitedDocumentIds } from "./lib/citations";
+import {
+	resolveCitationJumpTarget,
+	viewerJumpFromTarget,
+	type ViewerJumpRequest,
+} from "./lib/citation-jump";
+import type { VerifiedCitation } from "./types";
 
 export default function App() {
+	const [viewerJump, setViewerJump] = useState<ViewerJumpRequest | null>(null);
+
 	const {
 		conversations,
 		selectedId,
@@ -27,7 +35,9 @@ export default function App() {
 		refreshing: messagesRefreshing,
 		error: messagesError,
 		streaming,
+		verifying,
 		streamingContent,
+		pendingGrounding,
 		send,
 	} = useMessages(selectedId);
 
@@ -92,6 +102,18 @@ export default function App() {
 		await create();
 	}, [create]);
 
+	const handleCitationClick = useCallback(
+		async (citation: VerifiedCitation) => {
+			const target = await resolveCitationJumpTarget(citation, documents);
+			if (!target) {
+				return;
+			}
+			setActiveDocument(target.documentId);
+			setViewerJump(viewerJumpFromTarget(target));
+		},
+		[documents, setActiveDocument],
+	);
+
 	return (
 		<TooltipProvider delayDuration={200}>
 			<div className="flex h-screen bg-neutral-50">
@@ -111,13 +133,16 @@ export default function App() {
 						refreshing={messagesRefreshing}
 						error={messagesError}
 						streaming={streaming}
+						verifying={verifying}
 						streamingContent={streamingContent}
+						pendingGrounding={pendingGrounding}
 						hasDocument={hasDocuments}
 						conversationId={selectedId}
 						contextFull={contextFull}
 						onSend={handleSend}
 						onUpload={handleUpload}
 						uploading={uploading}
+						onCitationClick={handleCitationClick}
 					/>
 
 					{selectedId && (
@@ -131,6 +156,7 @@ export default function App() {
 							conversationId={selectedId}
 							contextUsage={contextUsage}
 							contextUsageLoading={contextUsageLoading}
+							jumpRequest={viewerJump}
 							onSelect={setActiveDocument}
 							onUpload={handleUpload}
 							onRemove={handleRemoveDocument}

@@ -1,9 +1,16 @@
 import { ChevronLeft, ChevronRight, FileText, Loader2 } from "lucide-react";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { Document as PDFDocument, Page, pdfjs } from "react-pdf";
+import type { TextContent } from "pdfjs-dist/types/src/display/api";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
 import { getDocumentUrl } from "../lib/api";
+import type { ViewerJumpRequest } from "../lib/citation-jump";
+import {
+	findHighlightItemIndices,
+	renderHighlightedTextItem,
+	scrollElementIntoContainer,
+} from "../lib/pdf-highlight";
 import type { Document } from "../types";
 import { Button } from "./ui/button";
 
@@ -17,62 +24,58 @@ const CONTENT_PADDING = 32;
 interface DocumentViewerProps {
 	document: Document | null;
 	containerWidth?: number;
+	jumpRequest?: ViewerJumpRequest | null;
 }
 
-interface PageDimensions {
-	width: number;
-	height: number;
-}
-
-function computePageRenderWidth(
-	containerWidth: number,
-	containerHeight: number,
-	page: PageDimensions | null,
-): number {
-	const availableWidth = Math.max(240, containerWidth - CONTENT_PADDING);
-	const availableHeight = Math.max(240, containerHeight - CONTENT_PADDING);
-
-	if (!page || page.width <= 0 || page.height <= 0) {
-		return availableWidth;
-	}
-
-	const widthFromHeight = availableHeight * (page.width / page.height);
-	return Math.floor(Math.min(availableWidth, widthFromHeight));
+function computePageRenderWidth(containerWidth: number): number {
+	return Math.max(240, containerWidth - CONTENT_PADDING);
 }
 
 export function DocumentViewer({
 	document,
 	containerWidth,
+	jumpRequest = null,
 }: DocumentViewerProps) {
 	const [numPages, setNumPages] = useState<number>(0);
 	const [currentPage, setCurrentPage] = useState(1);
+	const [searchText, setSearchText] = useState<string | null>(null);
+	const [highlightedIndices, setHighlightedIndices] = useState<Set<number>>(
+		new Set(),
+	);
 	const [pdfLoading, setPdfLoading] = useState(true);
 	const [pdfError, setPdfError] = useState<string | null>(null);
-	const [contentSize, setContentSize] = useState({ width: 360, height: 480 });
-	const [pageDimensions, setPageDimensions] = useState<PageDimensions | null>(
-		null,
-	);
 	const contentRef = useRef<HTMLDivElement>(null);
+	const pageTextItemsRef = useRef<TextContent["items"] | null>(null);
 	const previousDocumentId = useRef<string | null | undefined>(undefined);
 
-	// Re-attach when the scroll container mounts (first document) or the panel resizes.
-	// biome-ignore lint/correctness/useExhaustiveDependencies: document?.id and containerWidth trigger re-measure
+	const applyHighlight = useCallback((phrase: string | null) => {
+		if (!phrase) {
+			setHighlightedIndices(new Set());
+			return;
+		}
+		const items = pageTextItemsRef.current;
+		if (!items) {
+			return;
+		}
+		setHighlightedIndices(findHighlightItemIndices(items, phrase));
+	}, []);
+
+	const clearHighlight = useCallback(() => {
+		setSearchText(null);
+		setHighlightedIndices(new Set());
+	}, []);
+
+	const goToPage = useCallback(
+		(page: number) => {
+			clearHighlight();
+			setCurrentPage(page);
+		},
+		[clearHighlight],
+	);
+
 	useLayoutEffect(() => {
-		const element = contentRef.current;
-		if (!element) return;
-
-		const updateSize = () => {
-			setContentSize({
-				width: element.clientWidth,
-				height: element.clientHeight,
-			});
-		};
-
-		updateSize();
-		const observer = new ResizeObserver(updateSize);
-		observer.observe(element);
-		return () => observer.disconnect();
-	}, [document?.id, containerWidth]);
+		pageTextItemsRef.current = null;
+	}, [currentPage]);
 
 	useLayoutEffect(() => {
 		const currentId = document?.id ?? null;
@@ -84,12 +87,67 @@ export function DocumentViewer({
 			return;
 		}
 		previousDocumentId.current = currentId;
-		setCurrentPage(1);
+		goToPage(1);
 		setNumPages(0);
 		setPdfLoading(true);
 		setPdfError(null);
-		setPageDimensions(null);
-	}, [document?.id]);
+	}, [document?.id, goToPage]);
+
+	useLayoutEffect(() => {
+		if (!document || !jumpRequest || jumpRequest.documentId !== document.id) {
+			return;
+		}
+		const page = Math.min(
+			Math.max(1, jumpRequest.page),
+			numPages > 0 ? numPages : jumpRequest.page,
+		);
+		setCurrentPage(page);
+		setSearchText(jumpRequest.searchText ?? null);
+		contentRef.current?.scrollTo({ top: 0, behavior: "auto" });
+	}, [document?.id, jumpRequest?.key, jumpRequest?.page, numPages]);
+
+	// Same-page jumps do not remount <Page>, so recompute from cached text items.
+	useLayoutEffect(() => {
+		applyHighlight(searchText);
+	}, [searchText, jumpRequest?.key, applyHighlight]);
+
+	const handleGetTextSuccess = useCallback(
+		(text: TextContent) => {
+			pageTextItemsRef.current = text.items;
+			applyHighlight(searchText);
+		},
+		[searchText, applyHighlight],
+	);
+
+	const customTextRenderer = useCallback(
+		(textItem: { str: string; itemIndex: number }) =>
+			renderHighlightedTextItem(
+				textItem.str,
+				textItem.itemIndex,
+				highlightedIndices,
+			),
+		[highlightedIndices],
+	);
+
+	const scrollHighlightIntoView = useCallback(() => {
+		const container = contentRef.current;
+		if (!container || highlightedIndices.size === 0) {
+			return;
+		}
+		const mark = container.querySelector("mark.citation-highlight");
+		if (mark) {
+			scrollElementIntoContainer(container, mark);
+		}
+	}, [highlightedIndices]);
+
+	useLayoutEffect(() => {
+		if (highlightedIndices.size > 0) {
+			scrollHighlightIntoView();
+		}
+	}, [highlightedIndices, scrollHighlightIntoView]);
+
+	// Panel width is stable; measuring inside the scroll area causes a scrollbar ↔ width loop.
+	const pageRenderWidth = computePageRenderWidth(containerWidth ?? 480);
 
 	if (!document) {
 		return (
@@ -101,11 +159,6 @@ export function DocumentViewer({
 	}
 
 	const pdfUrl = getDocumentUrl(document.id);
-	const pageRenderWidth = computePageRenderWidth(
-		contentSize.width,
-		contentSize.height,
-		pageDimensions,
-	);
 
 	return (
 		<div className="flex h-full min-h-0 flex-1 flex-col bg-white">
@@ -114,13 +167,13 @@ export function DocumentViewer({
 					<p className="truncate text-sm font-medium text-neutral-800">
 						{document.filename}
 					</p>
-					<p className="text-xs text-neutral-400">
-						{document.page_count} page{document.page_count !== 1 ? "s" : ""}
-					</p>
 				</div>
 			</div>
 
-			<div ref={contentRef} className="flex min-h-0 flex-1 overflow-y-auto p-4">
+			<div
+				ref={contentRef}
+				className="flex min-h-0 flex-1 overflow-y-scroll overscroll-contain p-4"
+			>
 				<div className="mx-auto flex w-full min-w-0 justify-center">
 					{pdfError && (
 						<div className="rounded-lg bg-red-50 p-3 text-sm text-red-600">
@@ -148,16 +201,14 @@ export function DocumentViewer({
 					>
 						{!pdfLoading && !pdfError && (
 							<Page
-								key={`${currentPage}-${pageRenderWidth}`}
+								key={currentPage}
 								pageNumber={currentPage}
 								width={pageRenderWidth}
-								onLoadSuccess={(page) => {
-									const viewport = page.getViewport({ scale: 1 });
-									setPageDimensions({
-										width: viewport.width,
-										height: viewport.height,
-									});
-								}}
+								customTextRenderer={
+									searchText ? customTextRenderer : undefined
+								}
+								onGetTextSuccess={handleGetTextSuccess}
+								onRenderTextLayerSuccess={scrollHighlightIntoView}
 								loading={
 									<div className="flex items-center justify-center py-12">
 										<Loader2 className="h-5 w-5 animate-spin text-neutral-300" />
@@ -176,10 +227,7 @@ export function DocumentViewer({
 						size="icon"
 						className="h-7 w-7"
 						disabled={currentPage <= 1}
-						onClick={() => {
-							setPageDimensions(null);
-							setCurrentPage((p) => Math.max(1, p - 1));
-						}}
+						onClick={() => goToPage(Math.max(1, currentPage - 1))}
 					>
 						<ChevronLeft className="h-4 w-4" />
 					</Button>
@@ -191,10 +239,7 @@ export function DocumentViewer({
 						size="icon"
 						className="h-7 w-7"
 						disabled={currentPage >= numPages}
-						onClick={() => {
-							setPageDimensions(null);
-							setCurrentPage((p) => Math.min(numPages, p + 1));
-						}}
+						onClick={() => goToPage(Math.min(numPages, currentPage + 1))}
 					>
 						<ChevronRight className="h-4 w-4" />
 					</Button>

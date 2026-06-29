@@ -21,9 +21,39 @@ vi.mock("react-pdf", () => ({
 		}, [file]);
 		return <div data-testid="pdf-document">{children}</div>;
 	},
-	Page: ({ pageNumber }: { pageNumber: number }) => (
-		<div data-testid="pdf-page">Page {pageNumber}</div>
-	),
+	Page: ({
+		pageNumber,
+		onGetTextSuccess,
+		customTextRenderer,
+	}: {
+		pageNumber: number;
+		onGetTextSuccess?: (text: { items: { str: string }[] }) => void;
+		customTextRenderer?: (item: { str: string; itemIndex: number }) => string;
+	}) => {
+		// biome-ignore lint/correctness/useExhaustiveDependencies: simulate text layer on mount
+		useEffect(() => {
+			onGetTextSuccess?.({
+				items: [
+					{ str: "The cap" },
+					{ str: "is" },
+					{ str: "£2,000,000" },
+					{ str: "for all claims." },
+				],
+			});
+		}, [pageNumber]);
+		const rendered2 =
+			customTextRenderer?.({ str: "£2,000,000", itemIndex: 2 }) ?? "£2,000,000";
+		const rendered3 =
+			customTextRenderer?.({ str: "for all claims.", itemIndex: 3 }) ??
+			"for all claims.";
+		return (
+			<div data-testid="pdf-page">
+				Page {pageNumber}
+				<span data-testid="highlight-2">{rendered2}</span>
+				<span data-testid="highlight-3">{rendered3}</span>
+			</div>
+		);
+	},
 }));
 
 function makeDoc(id: string, filename: string): Document {
@@ -61,6 +91,60 @@ describe("DocumentViewer", () => {
 		expect(screen.getByText("lease.pdf")).toBeTruthy();
 		await waitFor(() => {
 			expect(screen.getByTestId("pdf-page").textContent).toBe("Page 1");
+		});
+	});
+
+	it("jumps to the requested page when jumpRequest is provided", async () => {
+		const doc = makeDoc("doc-1", "lease.pdf");
+		const jumpRequest = {
+			documentId: "doc-1",
+			page: 3,
+			searchText: "The cap is £2m",
+			key: 1,
+		};
+
+		render(<DocumentViewer document={doc} jumpRequest={jumpRequest} />);
+
+		await waitFor(() => {
+			expect(screen.getByTestId("pdf-page").textContent).toBe("Page 3");
+		});
+		expect(screen.queryByText(/Referencing:/)).toBeNull();
+	});
+
+	it("updates highlight when jumping to the same page with different search text", async () => {
+		const doc = makeDoc("doc-1", "lease.pdf");
+		const firstJump = {
+			documentId: "doc-1",
+			page: 2,
+			searchText: "The cap is £2,000,000",
+			key: 1,
+		};
+		const secondJump = {
+			documentId: "doc-1",
+			page: 2,
+			searchText: "for all claims.",
+			key: 2,
+		};
+
+		const { rerender } = render(
+			<DocumentViewer document={doc} jumpRequest={firstJump} />,
+		);
+
+		await waitFor(() => {
+			expect(screen.getByTestId("highlight-2").innerHTML).toContain(
+				"citation-highlight",
+			);
+		});
+
+		rerender(<DocumentViewer document={doc} jumpRequest={secondJump} />);
+
+		await waitFor(() => {
+			expect(screen.getByTestId("highlight-3").innerHTML).toContain(
+				"citation-highlight",
+			);
+			expect(screen.getByTestId("highlight-2").innerHTML).not.toContain(
+				"citation-highlight",
+			);
 		});
 	});
 

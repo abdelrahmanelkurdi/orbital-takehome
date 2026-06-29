@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import type { UploadQueueItem } from "../hooks/use-documents";
+import type { ViewerJumpRequest } from "../lib/citation-jump";
 import type { ContextUsage, Document } from "../types";
 import { DocumentRail } from "./DocumentRail";
 import { DocumentViewer } from "./DocumentViewer";
@@ -18,6 +19,7 @@ interface DocumentPanelProps {
 	conversationId: string | null;
 	contextUsage: ContextUsage | null;
 	contextUsageLoading: boolean;
+	jumpRequest?: ViewerJumpRequest | null;
 	onSelect: (documentId: string) => void;
 	onUpload: (files: File[]) => void;
 	onRemove: (documentId: string) => void;
@@ -25,6 +27,7 @@ interface DocumentPanelProps {
 
 export function DocumentPanel({
 	activeDocument,
+	jumpRequest = null,
 	...railProps
 }: DocumentPanelProps) {
 	const [width, setWidth] = useState(DEFAULT_WIDTH);
@@ -68,7 +71,11 @@ export function DocumentPanel({
 			/>
 			<DocumentRail {...railProps} />
 			<div className="flex min-h-0 min-w-0 flex-1 flex-col">
-				<DocumentViewer document={activeDocument} containerWidth={width} />
+				<DocumentViewer
+					document={activeDocument}
+					containerWidth={width}
+					jumpRequest={jumpRequest}
+				/>
 			</div>
 		</div>
 	);

@@ -6,6 +6,10 @@ You've been given a working baseline application: a document Q&A tool for commer
 
 The app works, but it has limitations. Your job is to extend it.
 
+**Feature & rationale:** This submission adds grounded citations with click-to-verify in the PDF viewer. See **[DECISIONS.md](DECISIONS.md)** for the data-driven product write-up (2–3 paragraphs). Technical design: [`docs/grounded-citations/design.md`](docs/grounded-citations/design.md).
+
+**Walkthrough video:** [Loom demo](https://www.loom.com/share/a207290473a14d32af9dc7b4c6cc7616)
+
 ---
 
 ## Setup

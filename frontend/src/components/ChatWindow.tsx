@@ -1,9 +1,14 @@
 import { Loader2 } from "lucide-react";
 import { useEffect, useRef } from "react";
-import type { Message } from "../types";
+import type { Message, VerifiedCitation } from "../types";
 import { ChatInput } from "./ChatInput";
 import { EmptyState } from "./EmptyState";
-import { MessageBubble, StreamingBubble } from "./MessageBubble";
+import {
+	MessageBubble,
+	StreamingBubble,
+	VerifyingBubble,
+} from "./MessageBubble";
+import type { GroundingDisplay } from "../lib/grounding";
 
 interface ChatWindowProps {
 	messages: Message[];
@@ -11,13 +16,16 @@ interface ChatWindowProps {
 	refreshing?: boolean;
 	error: string | null;
 	streaming: boolean;
+	verifying?: boolean;
 	streamingContent: string;
+	pendingGrounding?: GroundingDisplay | null;
 	hasDocument: boolean;
 	conversationId: string | null;
 	contextFull?: boolean;
 	uploading?: boolean;
 	onSend: (content: string) => void;
 	onUpload: (files: File[]) => void;
+	onCitationClick?: (citation: VerifiedCitation) => void;
 }
 
 export function ChatWindow({
@@ -26,13 +34,16 @@ export function ChatWindow({
 	refreshing = false,
 	error,
 	streaming,
+	verifying = false,
 	streamingContent,
+	pendingGrounding = null,
 	hasDocument,
 	conversationId,
 	contextFull = false,
 	uploading = false,
 	onSend,
 	onUpload,
+	onCitationClick,
 }: ChatWindowProps) {
 	const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -43,7 +54,9 @@ export function ChatWindow({
 		if (scrollRef.current) {
 			scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
 		}
-	}, [messagesLength, streamingContent]);
+	}, [messagesLength, streamingContent, verifying]);
+
+	const inputDisabled = streaming;
 
 	// No conversation selected
 	if (!conversationId) {
@@ -85,7 +98,7 @@ export function ChatWindow({
 				<ChatInput
 					onSend={onSend}
 					onUpload={onUpload}
-					disabled={streaming}
+					disabled={inputDisabled}
 					contextFull={contextFull}
 					uploading={uploading}
 				/>
@@ -110,16 +123,27 @@ export function ChatWindow({
 			<div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-4">
 				<div className="mx-auto max-w-2xl space-y-1">
 					{messages.map((message) => (
-						<MessageBubble key={message.id} message={message} />
+						<MessageBubble
+							key={message.id}
+							message={message}
+							onCitationClick={onCitationClick}
+						/>
 					))}
 					{streaming && <StreamingBubble content={streamingContent} />}
+					{verifying && !streaming && (
+						<VerifyingBubble
+							content={streamingContent}
+							grounding={pendingGrounding}
+							onCitationClick={onCitationClick}
+						/>
+					)}
 				</div>
 			</div>
 
 			<ChatInput
 				onSend={onSend}
 				onUpload={onUpload}
-				disabled={streaming}
+				disabled={inputDisabled}
 				contextFull={contextFull}
 				uploading={uploading}
 			/>

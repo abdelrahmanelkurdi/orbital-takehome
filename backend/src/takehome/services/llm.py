@@ -5,10 +5,12 @@ import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import NotRequired, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 import structlog
+from pydantic import BaseModel, Field
 from pydantic_ai import Agent
+from pydantic_ai.settings import ModelSettings
 
 from takehome.config import settings
 
@@ -577,6 +579,276 @@ def analyze_document_citations(
         for ordinal in sorted(counts)
     )
     return CitationAnalysis(citations=citations)
+
+
+# --------------------------------------------------------------------------- #
+# Grounded citations — judge agent (Phase 1)
+# --------------------------------------------------------------------------- #
+
+Basis = Literal["document", "general_knowledge", "mixed", "not_in_documents"]
+GroundingStatus = Literal["grounded", "partial", "ungrounded"]
+
+
+class CitationRef(BaseModel):
+    """A document location the judge believes supports a block."""
+
+    document_ordinal: int
+    label: str = Field(description='e.g. "Section 4.1", "page 12"')
+    page: int | None = None
+    quote: str | None = Field(
+        default=None,
+        description="Verbatim excerpt from the document that supports the claim",
+    )
+
+
+class AnnotatedBlock(BaseModel):
+    """One paragraph or bullet from the assistant answer with grounding metadata."""
+
+    block_index: int
+    text: str
+    basis: Basis
+    citations: list[CitationRef] = Field(default_factory=list)
+
+
+class AnswerAnnotation(BaseModel):
+    """Structured grounding verdict from the judge agent."""
+
+    blocks: list[AnnotatedBlock]
+    grounding_status: GroundingStatus
+    summary: str | None = Field(
+        default=None,
+        description="One-line explanation for partial or ungrounded answers",
+    )
+
+
+@dataclass(frozen=True)
+class VerifiedCitation:
+    document_ordinal: int
+    document_id: str
+    label: str
+    page: int | None
+    quote: str | None
+    verified: bool
+
+
+@dataclass(frozen=True)
+class GroundingBlock:
+    block_index: int
+    text: str
+    basis: Basis
+    citations: tuple[VerifiedCitation, ...]
+
+
+@dataclass(frozen=True)
+class GroundingResult:
+    """Judge output after quote verification and citation aggregation."""
+
+    grounding_status: GroundingStatus
+    grounding_summary: str | None
+    blocks: tuple[GroundingBlock, ...]
+    citations: tuple[DocumentCitation, ...]
+
+    @property
+    def sources_cited(self) -> int:
+        return sum(c.count for c in self.citations)
+
+    @property
+    def cited_document_ids(self) -> list[str]:
+        return [c.document_id for c in self.citations]
+
+    def blocks_as_json(self) -> list[dict[str, object]]:
+        """Serialize blocks for persistence in ``messages.grounding_payload``."""
+        return [
+            {
+                "block_index": block.block_index,
+                "text": block.text,
+                "basis": block.basis,
+                "citations": [
+                    {
+                        "document_ordinal": c.document_ordinal,
+                        "document_id": c.document_id,
+                        "label": c.label,
+                        "page": c.page,
+                        "quote": c.quote,
+                        "verified": c.verified,
+                    }
+                    for c in block.citations
+                ],
+            }
+            for block in self.blocks
+        ]
+
+
+JUDGE_SYSTEM_PROMPT = (
+    "You are a skeptical legal document reviewer — not the author of the answer. "
+    "Your job is to audit an assistant's response against the uploaded documents.\n\n"
+    "For each paragraph or bullet in the answer, classify its basis:\n"
+    "- document — factual claim directly supported by a verbatim quote in the documents\n"
+    "- general_knowledge — legal concept or market norm not stated in the documents\n"
+    "- mixed — partly from documents, partly inference or world knowledge\n"
+    "- not_in_documents — factual claim about the deal with no support in the documents\n\n"
+    "Rules:\n"
+    "- Segment the answer into meaningful paragraphs and bullets (one block each).\n"
+    "- Mirror each block's text closely from the answer.\n"
+    "- For document-backed claims, include citations with document_ordinal, label, "
+    "and a quote field.\n\n"
+    "Quote rules (critical — quotes are verified by exact substring match):\n"
+    "- Every quote MUST be copied character-for-character from the document text "
+    "provided above: one contiguous span as it appears in the extraction.\n"
+    "- Do NOT summarize, paraphrase, or merge separate lines/fields into one quote.\n"
+    "- Do NOT omit any part of the quote to make it shorter.\n"
+    "- Do NOT skip intervening text (e.g. page headers) to join two fields that are "
+    "not adjacent in the extraction.\n"
+    "- Prefer a shorter verbatim phrase over a longer synthesized one.\n\n"
+    "Absence and gap claims (e.g. \"the document does not identify…\", "
+    "\"no contact details are provided…\"):\n"
+    "- Classify as mixed, not document — the claim combines cited text with inference "
+    "about what is missing.\n"
+    "- Cite the nearest related passage (e.g. a generic reference without the missing "
+    "detail) so the user can verify partial context; the absence itself is the "
+    "inferred part.\n"
+    "- Never use basis document with zero citations when related text exists in the "
+    "document.\n\n"
+    "Other rules:\n"
+    "- If the answer cites a section that does not exist in the documents, mark the "
+    "block as not_in_documents or mixed and explain in summary.\n"
+    "- grounding_status: grounded if all substantive blocks are document-backed with "
+    "valid quotes; partial if there is a mix; ungrounded if no document-backed blocks "
+    "or critical claims lack support.\n"
+    "- Be strict on positive factual claims. Use mixed for absence/inference claims "
+    "with a supporting citation to the related passage."
+)
+
+_judge_model_settings = ModelSettings(temperature=0)
+judge_agent = Agent(
+    "anthropic:" + MODEL_NAME,
+    system_prompt=JUDGE_SYSTEM_PROMPT,
+    output_type=AnswerAnnotation,
+    model_settings=_judge_model_settings,
+)
+
+
+def build_judge_prompt(
+    user_message: str,
+    answer_text: str,
+    documents: list[DocumentContext],
+) -> str:
+    """Assemble the judge's audit prompt: question, answer, and document bodies."""
+    parts = [
+        "Audit the following assistant answer for grounding in the uploaded documents.\n",
+        build_document_context(documents, include_text=True),
+        "",
+        f"User question:\n{user_message}\n",
+        f"Assistant answer to audit:\n{answer_text}\n",
+        "Segment the answer into blocks and return structured grounding metadata. "
+        "Remember: quotes must be exact contiguous spans from the document text; "
+        "absence/gap claims should be mixed with a citation to the related passage.",
+    ]
+    return "\n".join(parts)
+
+
+def _normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def quote_verified_in_text(quote: str | None, extracted_text: str | None) -> bool:
+    """Deterministic check: does *quote* appear in *extracted_text* (modulo whitespace)?"""
+    if not quote or not extracted_text:
+        return False
+    return _normalize_whitespace(quote) in _normalize_whitespace(extracted_text)
+
+
+def aggregate_citations(
+    annotation: AnswerAnnotation,
+    documents: list[DocumentContext],
+) -> tuple[int, tuple[DocumentCitation, ...]]:
+    """Derive ``sources_cited`` and per-document counts from judge output — no regex."""
+    ordinal_to_id = {doc.ordinal: doc.id for doc in documents}
+    counts: dict[int, int] = {}
+
+    for block in annotation.blocks:
+        if block.basis not in ("document", "mixed"):
+            continue
+        for ref in block.citations:
+            if ref.document_ordinal in ordinal_to_id:
+                counts[ref.document_ordinal] = counts.get(ref.document_ordinal, 0) + 1
+
+    citations = tuple(
+        DocumentCitation(
+            document_id=ordinal_to_id[ordinal],
+            ordinal=ordinal,
+            count=counts[ordinal],
+        )
+        for ordinal in sorted(counts)
+    )
+    return sum(counts.values()), citations
+
+
+def _ordinal_to_extracted_text(documents: list[DocumentContext]) -> dict[int, str]:
+    return {
+        doc.ordinal: doc.extracted_text or ""
+        for doc in documents
+        if doc.is_active and doc.has_text
+    }
+
+
+def enrich_grounding(
+    annotation: AnswerAnnotation,
+    documents: list[DocumentContext],
+) -> GroundingResult:
+    """Verify judge quotes and attach stable document ids for persistence and SSE."""
+    text_by_ordinal = _ordinal_to_extracted_text(documents)
+    ordinal_to_id = {doc.ordinal: doc.id for doc in documents}
+
+    blocks: list[GroundingBlock] = []
+    for block in annotation.blocks:
+        verified_citations: list[VerifiedCitation] = []
+        for ref in block.citations:
+            doc_id = ordinal_to_id.get(ref.document_ordinal, "")
+            extracted = text_by_ordinal.get(ref.document_ordinal)
+            verified = bool(doc_id) and quote_verified_in_text(ref.quote, extracted)
+            verified_citations.append(
+                VerifiedCitation(
+                    document_ordinal=ref.document_ordinal,
+                    document_id=doc_id,
+                    label=ref.label,
+                    page=ref.page,
+                    quote=ref.quote,
+                    verified=verified,
+                )
+            )
+        blocks.append(
+            GroundingBlock(
+                block_index=block.block_index,
+                text=block.text,
+                basis=block.basis,
+                citations=tuple(verified_citations),
+            )
+        )
+
+    _, citations = aggregate_citations(annotation, documents)
+    return GroundingResult(
+        grounding_status=annotation.grounding_status,
+        grounding_summary=annotation.summary,
+        blocks=tuple(blocks),
+        citations=citations,
+    )
+
+
+def has_active_documents(documents: list[DocumentContext]) -> bool:
+    """True when at least one non-deleted document is attached (judge gate — design §locked #1)."""
+    return any(doc.is_active for doc in documents)
+
+
+async def judge_grounding(
+    user_message: str,
+    answer_text: str,
+    documents: list[DocumentContext],
+) -> AnswerAnnotation:
+    """Run the grounding judge on a completed assistant answer."""
+    prompt = build_judge_prompt(user_message, answer_text, documents)
+    result = await judge_agent.run(prompt)
+    return result.output
 
 
 async def generate_title(user_message: str) -> str:

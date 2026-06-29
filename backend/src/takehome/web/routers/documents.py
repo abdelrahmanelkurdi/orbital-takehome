@@ -12,6 +12,7 @@ from starlette.responses import FileResponse
 from takehome.db.models import Document
 from takehome.db.session import get_session
 from takehome.services.conversation import get_conversation
+from takehome.services.citation_jump import resolve_citation_page
 from takehome.services.document import (
     delete_document,
     get_document,
@@ -39,6 +40,10 @@ class DocumentOut(BaseModel):
     has_extracted_text: bool
 
     model_config = {"from_attributes": True}
+
+
+class CitationPageOut(BaseModel):
+    page: int | None
 
 
 def _document_out(document: Document) -> DocumentOut:
@@ -141,3 +146,25 @@ async def serve_document_file(
         filename=document.filename,
         media_type="application/pdf",
     )
+
+
+@router.get("/api/documents/{document_id}/citation-page", response_model=CitationPageOut)
+async def resolve_citation_page_endpoint(
+    document_id: str,
+    page: int | None = None,
+    label: str | None = None,
+    quote: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> CitationPageOut:
+    """Resolve a citation label or quote to a PDF page for viewer jump."""
+    document = await get_document(session, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    resolved = resolve_citation_page(
+        document.extracted_text,
+        page=page,
+        label=label,
+        quote=quote,
+    )
+    return CitationPageOut(page=resolved)

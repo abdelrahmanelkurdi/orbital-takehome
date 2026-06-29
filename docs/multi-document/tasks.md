@@ -2,6 +2,8 @@
 
 > Working checklist for implementing multi-document conversations.
 > **Read the full design first:** [`multi-document-support.md`](./multi-document-support.md). This file is the execution plan; the design doc is the source of truth for *why*.
+>
+> **Status:** Phases 0–9 complete. See [`../grounded-citations/`](../grounded-citations/) for the next proposed initiative.
 
 This tracker is written so an agent or engineer **without prior context** can pick it up. It restates the key decisions and assumptions, then lists concrete, checkable tasks per phase. Every phase ships with tests.
 

@@ -223,6 +223,27 @@ def stub_llm(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     async def fake_generate_title(_user_message: str) -> str:
         return "Stubbed Title"
 
+    async def fake_judge_grounding(
+        *, user_message: str, answer_text: str, documents: list, **_kwargs: object
+    ):
+        del user_message, answer_text
+        from takehome.services.llm import AnnotatedBlock, AnswerAnnotation
+
+        if not any(d.is_active for d in documents):
+            return AnswerAnnotation(blocks=[], grounding_status="ungrounded", summary=None)
+        return AnswerAnnotation(
+            blocks=[
+                AnnotatedBlock(
+                    block_index=0,
+                    text="stub",
+                    basis="general_knowledge",
+                    citations=[],
+                )
+            ],
+            grounding_status="partial",
+            summary="Stub judge.",
+        )
+
     def fake_count_tokens(text: str | None) -> int:
         if not text:
             return 0
@@ -231,6 +252,7 @@ def stub_llm(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     for module in (llm_module, messages_module):
         monkeypatch.setattr(module, "generate_title", fake_generate_title, raising=False)
         monkeypatch.setattr(module, "chat_with_documents", fake_chat, raising=False)
+        monkeypatch.setattr(module, "judge_grounding", fake_judge_grounding, raising=False)
 
     # Keep token counting offline + deterministic for the async budget gate.
     monkeypatch.setattr(llm_module, "count_tokens", fake_count_tokens, raising=False)

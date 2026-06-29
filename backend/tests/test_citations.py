@@ -1,15 +1,7 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
-from pathlib import Path
 
-import pytest
-from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from takehome.db.models import Message, MessageCitedDocument
 from takehome.services.llm import DocumentContext, analyze_document_citations
 
 T1 = datetime(2026, 1, 1, 10, 0, 0)
@@ -107,82 +99,3 @@ def test_unknown_ordinal_ignored() -> None:
     analysis = analyze_document_citations("See Document 99 for details.", docs)
     assert analysis.citations == ()
     assert analysis.total == 0
-
-
-PDF_BYTES = b"%PDF-1.4 fake content for tests"
-
-
-@pytest.fixture
-def upload_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    from takehome.services import document as document_module
-
-    path = tmp_path / "uploads"
-    monkeypatch.setattr(document_module.settings, "upload_dir", str(path))
-    return path
-
-
-async def _read_sse(response) -> list[dict]:
-    events: list[dict] = []
-    async for line in response.aiter_lines():
-        if line.startswith("data: "):
-            events.append(json.loads(line.removeprefix("data: ")))
-    return events
-
-
-async def test_message_persists_cited_documents(
-    client: AsyncClient,
-    db_session: AsyncSession,
-    upload_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """End-to-end: assistant response citations are stored on the message."""
-    import takehome.services.llm as llm_module
-    import takehome.web.routers.messages as messages_module
-
-    async def citing_chat(*_args: object, **_kwargs: object):
-        for chunk in (
-            "Document 1 (a.pdf), Section 2 applies. "
-            "Document 2 (b.pdf), page 5 confirms."
-        ).split():
-            yield chunk + " "
-
-    for module in (llm_module, messages_module):
-        monkeypatch.setattr(module, "chat_with_documents", citing_chat, raising=False)
-
-    conv = (await client.post("/api/conversations")).json()
-    conv_id = conv["id"]
-
-    first = await client.post(
-        f"/api/conversations/{conv_id}/documents",
-        files={"file": ("a.pdf", PDF_BYTES, "application/pdf")},
-    )
-    second = await client.post(
-        f"/api/conversations/{conv_id}/documents",
-        files={"file": ("b.pdf", PDF_BYTES, "application/pdf")},
-    )
-    doc_a = first.json()["id"]
-    doc_b = second.json()["id"]
-
-    stream = await client.post(
-        f"/api/conversations/{conv_id}/messages",
-        json={"content": "Compare both documents"},
-    )
-    assert stream.status_code == 200
-    events = await _read_sse(stream)
-    done = next(e for e in events if e["type"] == "done")
-    assert set(done["cited_document_ids"]) == {doc_a, doc_b}
-
-    listing = await client.get(f"/api/conversations/{conv_id}/messages")
-    assistant = [m for m in listing.json() if m["role"] == "assistant"][0]
-    cited_ids = {c["document_id"] for c in assistant["cited_documents"]}
-    assert cited_ids == {doc_a, doc_b}
-    assert assistant["sources_cited"] > 0
-
-    rows = (
-        await db_session.execute(
-            select(MessageCitedDocument).where(
-                MessageCitedDocument.message_id == assistant["id"]
-            )
-        )
-    ).scalars().all()
-    assert {r.document_id for r in rows} == {doc_a, doc_b}

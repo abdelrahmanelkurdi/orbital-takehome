@@ -1,15 +1,23 @@
 import { motion } from "framer-motion";
-import { Bot } from "lucide-react";
+import { Bot, Loader2 } from "lucide-react";
 import { Streamdown } from "streamdown";
 import "streamdown/styles.css";
 import { formatCitationSummary } from "../lib/citations";
-import type { Message } from "../types";
+import type { GroundingDisplay } from "../lib/grounding";
+import { GROUNDING_COPY } from "../lib/grounding";
+import type { Message, VerifiedCitation } from "../types";
+import { GroundedMessageBody } from "./GroundedMessageBody";
+import { GroundingBanner } from "./GroundingBanner";
 
 interface MessageBubbleProps {
 	message: Message;
+	onCitationClick?: (citation: VerifiedCitation) => void;
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+export function MessageBubble({
+	message,
+	onCitationClick,
+}: MessageBubbleProps) {
 	if (message.role === "system") {
 		return (
 			<motion.div
@@ -40,8 +48,12 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 		);
 	}
 
-	// Assistant message
 	const citationSummary = formatCitationSummary(message);
+	const grounding: GroundingDisplay = {
+		grounding_status: message.grounding_status,
+		grounding_summary: message.grounding_summary,
+		blocks: message.blocks,
+	};
 
 	return (
 		<motion.div
@@ -54,9 +66,12 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 				<Bot className="h-4 w-4 text-white" />
 			</div>
 			<div className="min-w-0 max-w-[80%]">
-				<div className="prose">
-					<Streamdown>{message.content}</Streamdown>
-				</div>
+				<GroundingBanner grounding={grounding} />
+				<GroundedMessageBody
+					content={message.content}
+					grounding={grounding}
+					onCitationClick={onCitationClick}
+				/>
 				{citationSummary && (
 					<p className="mt-1.5 text-xs text-neutral-400">{citationSummary}</p>
 				)}
@@ -94,6 +109,49 @@ export function StreamingBubble({ content }: StreamingBubbleProps) {
 					</div>
 				)}
 				<span className="inline-block h-4 w-0.5 animate-pulse bg-neutral-400" />
+			</div>
+		</div>
+	);
+}
+
+interface VerifyingBubbleProps {
+	content: string;
+	grounding?: GroundingDisplay | null;
+	onCitationClick?: (citation: VerifiedCitation) => void;
+}
+
+/** Answer prose is readable while the judge runs; input stays enabled. */
+export function VerifyingBubble({
+	content,
+	grounding,
+	onCitationClick,
+}: VerifyingBubbleProps) {
+	const hasBlocks = (grounding?.blocks?.length ?? 0) > 0;
+
+	return (
+		<div className="flex gap-3 py-1.5">
+			<div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-neutral-900">
+				<Bot className="h-4 w-4 text-white" />
+			</div>
+			<div className="min-w-0 max-w-[80%]">
+				{hasBlocks && grounding ? (
+					<>
+						<GroundingBanner grounding={grounding} />
+						<GroundedMessageBody
+							content={content}
+							grounding={grounding}
+							onCitationClick={onCitationClick}
+						/>
+					</>
+				) : (
+					<div className="prose">
+						<Streamdown>{content}</Streamdown>
+					</div>
+				)}
+				<p className="mt-2 flex items-center gap-1.5 text-xs text-neutral-500">
+					<Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+					{GROUNDING_COPY.checkingSources}
+				</p>
 			</div>
 		</div>
 	);

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../lib/api";
-import type { Message } from "../types";
+import type { GroundingDisplay } from "../lib/grounding";
+import type { GroundingBlock, GroundingStatus, Message } from "../types";
 
 /** Session cache — revisiting a chat shows messages immediately while revalidating. */
 const messageCache = new Map<string, Message[]>();
@@ -13,13 +14,29 @@ function writeCache(conversationId: string, messages: Message[]) {
 	messageCache.set(conversationId, messages);
 }
 
+interface SseGroundingEvent {
+	type: "grounding";
+	grounding_status: GroundingStatus;
+	grounding_summary?: string | null;
+	blocks?: GroundingBlock[];
+}
+
+function isGroundingEvent(
+	parsed: Record<string, unknown>,
+): parsed is SseGroundingEvent {
+	return parsed.type === "grounding" && typeof parsed.grounding_status === "string";
+}
+
 export function useMessages(conversationId: string | null) {
 	const [messages, setMessages] = useState<Message[]>([]);
 	const [loading, setLoading] = useState(false);
 	const [refreshing, setRefreshing] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [streaming, setStreaming] = useState(false);
+	const [verifying, setVerifying] = useState(false);
 	const [streamingContent, setStreamingContent] = useState("");
+	const [pendingGrounding, setPendingGrounding] =
+		useState<GroundingDisplay | null>(null);
 	const fetchGenerationRef = useRef(0);
 
 	const applyMessages = useCallback((id: string, next: Message[]) => {
@@ -86,7 +103,9 @@ export function useMessages(conversationId: string | null) {
 				return next;
 			});
 			setStreaming(true);
+			setVerifying(false);
 			setStreamingContent("");
+			setPendingGrounding(null);
 			setError(null);
 
 			try {
@@ -100,6 +119,8 @@ export function useMessages(conversationId: string | null) {
 				const decoder = new TextDecoder();
 				let accumulated = "";
 				let buffer = "";
+				let finalMessage: Message | null = null;
+				let pendingGroundingLocal: GroundingDisplay | null = null;
 
 				while (true) {
 					const { done, value } = await reader.read();
@@ -117,28 +138,45 @@ export function useMessages(conversationId: string | null) {
 						if (data === "[DONE]") continue;
 
 						try {
-							const parsed = JSON.parse(data) as {
-								type?: string;
-								content?: string;
-								delta?: string;
-								message?: Message;
-							};
+							const parsed = JSON.parse(data) as Record<string, unknown>;
 
-							if (parsed.type === "delta" && parsed.delta) {
+							if (parsed.type === "delta" && typeof parsed.delta === "string") {
 								accumulated += parsed.delta;
 								setStreamingContent(accumulated);
-							} else if (parsed.type === "content" && parsed.content) {
+							} else if (
+								parsed.type === "content" &&
+								typeof parsed.content === "string"
+							) {
 								accumulated += parsed.content;
 								setStreamingContent(accumulated);
-							} else if (parsed.type === "message" && parsed.message) {
+							} else if (parsed.type === "content_done") {
+								setStreaming(false);
+								if (parsed.grounding_pending === true) {
+									setVerifying(true);
+								}
+							} else if (isGroundingEvent(parsed)) {
+								pendingGroundingLocal = {
+									grounding_status: parsed.grounding_status,
+									grounding_summary: parsed.grounding_summary ?? null,
+									blocks: parsed.blocks ?? [],
+								};
+								setPendingGrounding(pendingGroundingLocal);
+							} else if (
+								parsed.type === "message" &&
+								parsed.message &&
+								typeof parsed.message === "object"
+							) {
+								finalMessage = parsed.message as Message;
 								setMessages((prev) => {
-									const next = [...prev, parsed.message as Message];
+									const next = [...prev, finalMessage as Message];
 									writeCache(conversationId, next);
 									return next;
 								});
 								accumulated = "";
+								setVerifying(false);
+								setPendingGrounding(null);
 							} else if (parsed.content && !parsed.type) {
-								accumulated += parsed.content;
+								accumulated += String(parsed.content);
 								setStreamingContent(accumulated);
 							}
 						} catch {
@@ -147,7 +185,8 @@ export function useMessages(conversationId: string | null) {
 					}
 				}
 
-				if (accumulated) {
+				// Fallback if server did not emit a message event (older API).
+				if (!finalMessage && accumulated) {
 					const assistantMessage: Message = {
 						id: `stream-${Date.now()}`,
 						conversation_id: conversationId,
@@ -155,6 +194,7 @@ export function useMessages(conversationId: string | null) {
 						content: accumulated,
 						sources_cited: 0,
 						created_at: new Date().toISOString(),
+						...pendingGroundingLocal,
 					};
 					setMessages((prev) => {
 						const next = [...prev, assistantMessage];
@@ -162,18 +202,17 @@ export function useMessages(conversationId: string | null) {
 						return next;
 					});
 				}
-
-				const freshMessages = await api.fetchMessages(conversationId);
-				applyMessages(conversationId, freshMessages);
 			} catch (err) {
 				if (err instanceof DOMException && err.name === "AbortError") return;
 				setError(err instanceof Error ? err.message : "Failed to send message");
 			} finally {
 				setStreaming(false);
+				setVerifying(false);
 				setStreamingContent("");
+				setPendingGrounding(null);
 			}
 		},
-		[conversationId, streaming, applyMessages],
+		[conversationId, streaming],
 	);
 
 	return {
@@ -182,7 +221,9 @@ export function useMessages(conversationId: string | null) {
 		refreshing,
 		error,
 		streaming,
+		verifying,
 		streamingContent,
+		pendingGrounding,
 		send,
 		refresh,
 	};
